@@ -1,0 +1,16 @@
+services:
+  flowdb:
+    build: .
+    container_name: flowdb_server
+    ports:
+      - "8000:8000"
+    volumes:
+      # Maps the folder "flow_data" on your laptop to "/app/flow_data" in the container
+      # This ensures your data survives if you delete the container!
+      - ./flow_data:/app/flow_data
+    environment:
+      - FLOWDB_PATH=/app/flow_data
+      - FLOWDB_VECTORIZER=openai
+      # Pass your key safely (it reads from your local .env file)
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    restart: unless-stopped

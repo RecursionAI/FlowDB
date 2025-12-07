@@ -50,7 +50,7 @@ def get_db():
 
 # Standard REST Endpoints
 @app.post("/v1/{collection_name}/upsert")
-async def rest_put(collection_name: str, payload: GenericRecord):
+def rest_put(collection_name: str, payload: GenericRecord):
     col = get_db().collection(collection_name, GenericRecord)
     vec = np.array(payload.vector, dtype=np.float32) if payload.vector else None
     col.upsert(payload.id, payload, vector=vec)
@@ -58,7 +58,7 @@ async def rest_put(collection_name: str, payload: GenericRecord):
 
 
 @app.get("/v1/{collection_name}/read/{key}")
-async def rest_get(collection_name: str, key: str):
+def rest_get(collection_name: str, key: str):
     col = get_db().collection(collection_name, GenericRecord)
     res = col.read(key)
     if not res: raise HTTPException(404, "Not found")
@@ -66,13 +66,13 @@ async def rest_get(collection_name: str, key: str):
 
 
 @app.get("/v1/{collection_name}/all")
-async def rest_list(collection_name: str, limit: int = 20, skip: int = 0):
+def rest_list(collection_name: str, limit: int = 20, skip: int = 0):
     col = get_db().collection(collection_name, GenericRecord)
     return col.all(limit=limit, skip=skip)
 
 
 @app.post("/v1/{collection_name}/search")
-async def rest_search(collection_name: str, query_text: str = Body(..., embed=True), limit: int = 5):
+def rest_search(collection_name: str, query_text: str = Body(..., embed=True), limit: int = 5):
     """
     Standard Search: Vector similarity lookup.
     """
@@ -95,7 +95,7 @@ mcp_asgi = mcp.sse_app()
 
 
 @mcp.tool()
-def flowdb_put(collection: str, key: str, data: Dict[str, Any], vector: List[float] = None):
+def flowdb_upsert(collection: str, key: str, data: Dict[str, Any], vector: List[float] = None):
     """
     Create or Update a record in the database.
     Use this to save data or fix typos in existing records.
@@ -107,18 +107,18 @@ def flowdb_put(collection: str, key: str, data: Dict[str, Any], vector: List[flo
     record = GenericRecord(id=key, data=data, vector=vector)
 
     vec_np = np.array(vector, dtype=np.float32) if vector else None
-    col.put(key, record, vector=vec_np)
+    col.upsert(key, record, vector=vec_np)
     return f"Successfully saved record {key} to collection {collection}"
 
 
 @mcp.tool()
-def flowdb_get(collection: str, key: str) -> str:
+def flowdb_read(collection: str, key: str) -> str:
     """
     Retrieve a full record by its ID.
     Returns the JSON representation of the data.
     """
     col = db_instance.collection(collection, GenericRecord)
-    res = col.get(key)
+    res = col.read(key)
     if not res:
         return "Error: Record not found."
     return str(res.data)
