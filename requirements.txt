@@ -1,0 +1,9 @@
+lmdb~=1.7.5
+usearch~=2.21.0
+numpy
+pydantic~=2.12.5
+fastapi~=0.124.0
+uvicorn~=0.38.0
+fastmcp~=2.13.3
+python-dotenv~=1.2.1
+requests~=2.32.5
