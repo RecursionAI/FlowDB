@@ -173,6 +173,14 @@ class Collection(Generic[T]):
 
         return results
 
+    def delete(self, key: str) -> bool:
+        """
+        Deletes a record.
+        Returns True if the record existed and was deleted, False otherwise.
+        """
+        with self.env.begin(write=True) as txn:
+            return txn.delete(key.encode(), db=self.main_db)
+
     def close(self):
         """Closes connections cleanly."""
         self.env.close()

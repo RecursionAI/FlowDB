@@ -111,6 +111,19 @@ class CollectionClient(Generic[T]):
 
         return results
 
+    def delete(self, key: str) -> bool:
+        """
+        Deletes a record by ID.
+        """
+        resp = requests.delete(self._url(f"delete/{key}"))
+
+        if resp.status_code == 404:
+            return False
+        if resp.status_code != 200:
+            raise FlowDBError(f"Delete failed: {resp.text}")
+
+        return True
+
 
 class FlowDB:
     """

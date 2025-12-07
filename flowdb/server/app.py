@@ -85,6 +85,15 @@ def rest_search(collection_name: str, query_text: str = Body(..., embed=True), l
     return [item.model_dump() for item in results]
 
 
+@app.delete("/v1/{collection_name}/delete/{key}")
+def rest_delete(collection_name: str, key: str):
+    col = get_db().collection(collection_name, GenericRecord)
+    deleted = col.delete(key)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Record not found")
+    return {"status": "deleted", "id": key}
+
+
 # --- 2. The FastMCP Server (For AI Agents) ---
 # We define this *separately* so we can curate exactly what the AI sees.
 # We don't want the AI to see internal API details, just the high-level tools.
@@ -125,18 +134,49 @@ def flowdb_read(collection: str, key: str) -> str:
 
 
 @mcp.tool()
-def flowdb_search(collection: str, query_vector: List[float]) -> str:
+def flowdb_search(collection: str, query: str) -> str:
     """
-    Semantic search. Finds records with similar vector embeddings.
-    Useful when you don't know the ID but know the 'meaning'.
+    Semantic search. Finds records by meaning (e.g. "Who is the admin?").
+    Do NOT provide a vector; just provide the text query.
     """
     col = db_instance.collection(collection, GenericRecord)
-    vec_np = np.array(query_vector, dtype=np.float32)
-    results = col.search(vector=vec_np, limit=3)
 
-    # Return a simplified string summary for the AI
+    # FIX 3: Accept 'query' string and let the Engine vectorize it!
+    # This fixes the "Dimensions doesn't match" error.
+    results = col.search(query_text=query, limit=3)
+
     summary = [f"ID: {r.id} | Data: {r.data}" for r in results]
     return "\n".join(summary)
+
+
+@mcp.tool()
+def flowdb_list(collection: str, limit: int = 20, skip: int = 0) -> str:
+    """
+    List records in a collection.
+    Use this to browse data, see what exists, or find IDs.
+    """
+    col = db_instance.collection(collection, GenericRecord)
+    results = col.all(limit=limit, skip=skip)
+
+    if not results:
+        return "No records found."
+
+    # Return a concise summary for the AI
+    summary = [f"ID: {r.id} | Data: {r.data}" for r in results]
+    return "\n".join(summary)
+
+
+@mcp.tool()
+def flowdb_delete(collection: str, key: str) -> str:
+    """
+    Delete a record by ID. Use this to remove outdated or incorrect information.
+    """
+    col = db_instance.collection(collection, GenericRecord)
+    success = col.delete(key)
+    if success:
+        return f"Successfully deleted record {key} from {collection}."
+    else:
+        return f"Record {key} was not found."
 
 
 # --- 3. The Merge (Mounting) ---
@@ -148,6 +188,7 @@ app.mount("/mcp", mcp_asgi)
 
 def start():
     uvicorn.run("flowdb.server.app:app", host="0.0.0.0", port=8000, reload=True)
+
 
 if __name__ == "__main__":
     start()
