@@ -1,18 +1,26 @@
 import os
+import base64
+import binascii
 import numpy as np
 import uvicorn
 from contextlib import asynccontextmanager
 from typing import Dict, Any, List, Optional
-from fastapi import FastAPI, Depends, HTTPException, status
-from fastapi.security import APIKeyHeader
-from fastapi.params import Body
+from fastapi import FastAPI, HTTPException, Body, Request, Response
 from pydantic import BaseModel
 from fastmcp import FastMCP
 from dotenv import load_dotenv
-from flowdb.core.engine import FlowDB
+
+# Import Core
+try:
+    from core.engine import FlowDB
+    from core.vectorizer import Vectorizer
+except ImportError:
+    from flowdb.core.engine import FlowDB
+    from flowdb.core.vectorizer import Vectorizer
 
 load_dotenv()
 
+# --- SHARED STATE ---
 db_instance: Optional[FlowDB] = None
 DB_PATH = os.getenv("FLOWDB_PATH", "./flow_data")
 
@@ -24,28 +32,94 @@ async def lifespan(app: FastAPI):
     db_instance = FlowDB(storage_path=DB_PATH)
     yield
     print("--- FlowDB Shutting Down ---")
+    if db_instance:
+        db_instance.close()
 
 
+# --- 1. The FastAPI App ---
 app = FastAPI(title="FlowDB", lifespan=lifespan)
 
-api_key_header = APIKeyHeader(name="Authorization", auto_error=False)
+
+# --- 🔒 SECURITY MIDDLEWARE (Pure ASGI Version) ---
+# We use a class instead of @app.middleware to avoid breaking SSE/MCP streams.
+class SecurityMiddleware:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        # Only handle HTTP requests (let websockets/lifespan pass through if needed)
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        # 1. Allow public paths
+        path = scope.get("path", "")
+        if path in ["/docs", "/openapi.json", "/favicon.ico"]:
+            await self.app(scope, receive, send)
+            return
+
+        # 2. Get Real Key
+        real_key = os.getenv("FLOWDB_API_KEY")
+        if not real_key:
+            # Open Access (Dev Mode)
+            await self.app(scope, receive, send)
+            return
+
+        # 3. Extract Headers & Query Params from ASGI Scope
+        headers = dict(scope.get("headers", []))
+        query_string = scope.get("query_string", b"").decode()
+
+        input_key = None
+
+        # Check Authorization Header (Bearer or Basic)
+        auth_header = headers.get(b"authorization", b"").decode()
+
+        if auth_header.startswith("Bearer "):
+            input_key = auth_header.split(" ")[1]
+        elif auth_header.startswith("Basic "):
+            try:
+                encoded_creds = auth_header.split(" ")[1]
+                decoded_bytes = base64.b64decode(encoded_creds)
+                decoded_str = decoded_bytes.decode("utf-8")
+                if ":" in decoded_str:
+                    _, password = decoded_str.split(":", 1)
+                    input_key = password
+                else:
+                    input_key = decoded_str
+            except Exception:
+                pass
+
+        # Check Query Param (?api_key=...)
+        if not input_key:
+            # Simple parse of query string
+            for param in query_string.split("&"):
+                if param.startswith("api_key="):
+                    input_key = param.split("=")[1]
+                    break
+
+        # 4. The Gatekeeper
+        if input_key != real_key:
+            # Send 403 Forbidden manually (ASGI style)
+            await send({
+                "type": "http.response.start",
+                "status": 403,
+                "headers": [(b"content-type", b"text/plain")],
+            })
+            await send({
+                "type": "http.response.body",
+                "body": b"Unauthorized: Invalid FlowDB API Key",
+            })
+            return
+
+        # 5. Success - Pass request through
+        await self.app(scope, receive, send)
 
 
-async def verify_api_key(api_key: str = Depends(api_key_header)):
-    real_key = os.getenv("FLOWDB_API_KEY")
-
-    if not real_key:
-        return True
-
-    if api_key != f"Bearer {real_key}":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Invalid API Key",
-        )
-    return True
+# Add the middleware to the app
+app.add_middleware(SecurityMiddleware)
 
 
-# Helper Models
+# --- Helper Models & DB Access ---
 class GenericRecord(BaseModel):
     id: str
     data: Dict[str, Any]
@@ -58,7 +132,9 @@ def get_db():
     return db_instance
 
 
-@app.post("/v1/{collection_name}/upsert", dependencies=[Depends(verify_api_key)])
+# --- Standard REST Endpoints ---
+
+@app.post("/v1/{collection_name}/upsert")
 def rest_put(collection_name: str, payload: GenericRecord):
     col = get_db().collection(collection_name, GenericRecord)
     vec = np.array(payload.vector, dtype=np.float32) if payload.vector else None
@@ -66,7 +142,7 @@ def rest_put(collection_name: str, payload: GenericRecord):
     return {"status": "success", "id": payload.id}
 
 
-@app.get("/v1/{collection_name}/read/{key}", dependencies=[Depends(verify_api_key)])
+@app.get("/v1/{collection_name}/read/{key}")
 def rest_get(collection_name: str, key: str):
     col = get_db().collection(collection_name, GenericRecord)
     res = col.read(key)
@@ -74,34 +150,21 @@ def rest_get(collection_name: str, key: str):
     return res
 
 
-@app.get("/v1/{collection_name}/all", dependencies=[Depends(verify_api_key)])
+@app.get("/v1/{collection_name}/all")
 def rest_list(collection_name: str, limit: int = 20, skip: int = 0):
     col = get_db().collection(collection_name, GenericRecord)
     return col.all(limit=limit, skip=skip)
 
 
-@app.post("/v1/{collection_name}/search", dependencies=[Depends(verify_api_key)])
+@app.post("/v1/{collection_name}/search")
 def rest_search(collection_name: str, query_text: str = Body(..., embed=True), limit: int = 5):
-    """
-    Standard Search: Vector similarity lookup.
-    """
     col = get_db().collection(collection_name, GenericRecord)
-
-    # This triggers the 'search' method in engine.py we just fixed
     results = col.search(query_text=query_text, limit=limit)
-
-    # Convert Pydantic models to plain dicts for JSON response
     return [item.model_dump() for item in results]
 
 
-@app.delete("/v1/{collection_name}/delete/{key}", dependencies=[Depends(verify_api_key)])
+@app.delete("/v1/{collection_name}/delete/{key}")
 def rest_delete(collection_name: str, key: str):
-    """
-    Delete a record in a collection by key.
-    :param collection_name: Name of the collection
-    :param key: Unique identifier of the record to delete
-    :return: JSONResponse confirming record deletion
-    """
     col = get_db().collection(collection_name, GenericRecord)
     deleted = col.delete(key)
     if not deleted:
@@ -109,28 +172,21 @@ def rest_delete(collection_name: str, key: str):
     return {"status": "deleted", "id": key}
 
 
-@app.get("/v1/collections", dependencies=[Depends(verify_api_key)])
+@app.get("/v1/collections")
 def rest_list_collections():
-    """
-    Returns a list of all active collections (tables).
-    """
     return {"collections": get_db().list_collections()}
 
 
+# --- 2. The FastMCP Server ---
 mcp = FastMCP("FlowDB Agent Interface")
-
 mcp_asgi = mcp.sse_app()
 
 
 @mcp.tool()
 def flowdb_upsert(collection: str, key: str, data: Dict[str, Any], vector: List[float] = None):
-    """
-    Create or Update a record in the database.
-    """
+    """Create or Update a record in the database."""
     col = db_instance.collection(collection, GenericRecord)
-
     record = GenericRecord(id=key, data=data, vector=vector)
-
     vec_np = np.array(vector, dtype=np.float32) if vector else None
     col.upsert(key, record, vector=vec_np)
     return f"Successfully saved record {key} to collection {collection}"
@@ -138,74 +194,51 @@ def flowdb_upsert(collection: str, key: str, data: Dict[str, Any], vector: List[
 
 @mcp.tool()
 def flowdb_read(collection: str, key: str) -> str:
-    """
-    Read data from the database.
-    :returns a single record in a collection
-    """
+    """Read data from the database."""
     col = db_instance.collection(collection, GenericRecord)
     res = col.read(key)
-    if not res:
-        return "Error: Record not found."
+    if not res: return "Error: Record not found."
     return str(res.data)
 
 
 @mcp.tool()
 def flowdb_search(collection: str, query: str) -> str:
-    """
-    Semantic search. Finds records by meaning (e.g. "Who is the admin?").
-    """
+    """Semantic search. Finds records by meaning."""
     col = db_instance.collection(collection, GenericRecord)
-
-    # FIX 3: Accept 'query' string and let the Engine vectorize it!
-    # This fixes the "Dimensions doesn't match" error.
     results = col.search(query_text=query, limit=3)
-
     summary = [f"ID: {r.id} | Data: {r.data}" for r in results]
     return "\n".join(summary)
 
 
 @mcp.tool()
 def flowdb_list(collection: str, limit: int = 20, skip: int = 0) -> str:
-    """
-    List records in a collection.
-    :returns a list of objects or 'records' in a collection, up to the specified limit.
-    Utilize skip and limit for pagination
-    """
+    """List records in a collection."""
     col = db_instance.collection(collection, GenericRecord)
     results = col.all(limit=limit, skip=skip)
-
-    if not results:
-        return "No records found."
-
-    # Return a concise summary for the AI
+    if not results: return "No records found."
     summary = [f"ID: {r.id} | Data: {r.data}" for r in results]
     return "\n".join(summary)
 
 
 @mcp.tool()
 def flowdb_list_collections() -> str:
-    """
-    List all available collections.
-    """
+    """List all available collections."""
     names = db_instance.list_collections()
-    if not names:
-        return "No collections found."
+    if not names: return "No collections found."
     return "Available Collections:\n- " + "\n- ".join(names)
 
 
 @mcp.tool()
 def flowdb_delete(collection: str, key: str) -> str:
-    """
-    Delete a record by ID.
-    """
+    """Delete a record by ID."""
     col = db_instance.collection(collection, GenericRecord)
     success = col.delete(key)
     if success:
         return f"Successfully deleted record {key} from {collection}."
-    else:
-        return f"Record {key} was not found."
+    return f"Record {key} was not found."
 
 
+# --- 3. Mount and Start ---
 app.mount("/mcp", mcp_asgi)
 
 

@@ -210,3 +210,16 @@ class FlowDB:
             collections.append(name)
 
         return sorted(collections)
+
+    def close(self):
+        """
+        Closes all open collections and their underlying LMDB/USearch environments.
+        This fixes the AttributeError on shutdown.
+        """
+        for name, col in self.collections.items():
+            try:
+                col.close()
+                print(f"Closed collection: {name}")
+            except Exception as e:
+                print(f"Error closing collection {name}: {e}")
+        self.collections.clear()
