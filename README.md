@@ -94,8 +94,9 @@ The robust way to deploy to DigitalOcean, Railway, or AWS.
 services:
   flowdb:
     image: python:3.11-slim
-    # Installs the package and starts the server
-    command: ["pip", "install", "flowdb-ai", "&&", "flowdb", "start"]
+    # We use 'sh -c' so we can chain commands with &&
+    command: >
+      sh -c "pip install flowdb-ai && flowdb start --host 0.0.0.0"
     ports:
       - "8000:8000"
     volumes:

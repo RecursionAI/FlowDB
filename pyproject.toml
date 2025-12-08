@@ -41,3 +41,4 @@ flowdb = "flowdb.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["flowdb"]
+exclude = ["Dockerfile", "docker-compose.yml", ".env", "tests"]
