@@ -2,14 +2,13 @@ import os
 import lmdb
 import struct
 import numpy as np
+import glob  # <--- NEW IMPORT
 from typing import Type, List, Optional, Generic, TypeVar
 from pydantic import BaseModel
 from usearch.index import Index
 
-# --- NEW IMPORT ---
 from flowdb.core.vectorizer import Vectorizer
 
-# Generic type for Pydantic models
 T = TypeVar("T", bound=BaseModel)
 
 
@@ -33,11 +32,10 @@ class Collection(Generic[T]):
         # Ensure directories exist
         os.makedirs(db_path, exist_ok=True)
 
-        # --- NEW: Initialize Vectorizer ---
-        # It auto-detects if OPENAI_API_KEY is present
+        # Initialize Vectorizer (auto-detects OPENAI_API_KEY)
         self.vectorizer = Vectorizer(provider="auto")
 
-        # 1. Setup LMDB Environment
+        # Setup LMDB Environment
         self.env = lmdb.open(
             os.path.join(db_path, "data.lmdb"),
             max_dbs=10,
@@ -49,7 +47,7 @@ class Collection(Generic[T]):
         self.id_map_db = self.env.open_db(f"{name}:idmap".encode(), create=True)
         self.meta_db = self.env.open_db(f"{name}:meta".encode(), create=True)
 
-        # 2. Setup USearch Index
+        # Setup USearch Index
         self.index_path = os.path.join(db_path, f"{name}.usearch")
         self.index = Index(ndim=vector_dim)
 
@@ -82,28 +80,26 @@ class Collection(Generic[T]):
         """
         json_data = record.model_dump_json()
 
-        # 1. Auto-Vectorize if missing
+        # Auto-Vectorize if missing
         if vector is None:
             vector = self.vectorizer.embed(json_data)
 
-        # 2. SAFETY CAST: Ensure it is ALWAYS a float32 numpy array
-        # This fixes the "Expects a NumPy array" error
+        # SAFETY CAST: Ensure it is ALWAYS a float32 numpy array
         if not isinstance(vector, np.ndarray):
             vector = np.array(vector, dtype=np.float32)
         else:
-            # Even if it is an array, ensure it is float32 (USearch standard)
             if vector.dtype != np.float32:
                 vector = vector.astype(np.float32)
 
-        # 2. Get a unique Integer ID for USearch
+        # Get unique ID
         doc_id = self._get_next_doc_id()
 
-        # 3. Write Transaction (LMDB)
+        # Write Transaction (LMDB)
         with self.env.begin(write=True) as txn:
             txn.put(key.encode(), json_data.encode(), db=self.main_db)
             txn.put(struct.pack('>Q', doc_id), key.encode(), db=self.id_map_db)
 
-        # 4. Add to Vector Index (USearch)
+        # Add to Vector Index (USearch)
         self.index.add(doc_id, vector)
         self.index.save(self.index_path)
 
@@ -140,9 +136,8 @@ class Collection(Generic[T]):
     def search(self, vector: Optional[np.ndarray] = None, query_text: Optional[str] = None, limit: int = 5) -> List[T]:
         """
         Performs vector search.
-        You can pass a raw 'vector' OR a 'query_text' string.
         """
-        # 1. Convert Text -> Vector
+        # Convert Text -> Vector
         if vector is None and query_text is not None:
             vector = self.vectorizer.embed(query_text)
 
@@ -176,7 +171,6 @@ class Collection(Generic[T]):
     def delete(self, key: str) -> bool:
         """
         Deletes a record.
-        Returns True if the record existed and was deleted, False otherwise.
         """
         with self.env.begin(write=True) as txn:
             return txn.delete(key.encode(), db=self.main_db)
@@ -198,3 +192,21 @@ class FlowDB:
         if name not in self.collections:
             self.collections[name] = Collection(name, model, self.storage_path)
         return self.collections[name]
+
+    def list_collections(self) -> List[str]:
+        """
+        Scans the storage directory to find all active collections.
+        Returns a list of names like ['users', 'orders'].
+        """
+        # Look for .usearch files (one per collection)
+        pattern = os.path.join(self.storage_path, "*.usearch")
+        files = glob.glob(pattern)
+
+        collections = []
+        for f in files:
+            filename = os.path.basename(f)
+            # Remove extension to get collection name
+            name = os.path.splitext(filename)[0]
+            collections.append(name)
+
+        return sorted(collections)

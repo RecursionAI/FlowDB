@@ -3,20 +3,16 @@ import numpy as np
 import uvicorn
 from contextlib import asynccontextmanager
 from typing import Dict, Any, List, Optional
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi.security import APIKeyHeader
 from fastapi.params import Body
 from pydantic import BaseModel
 from fastmcp import FastMCP
-from dotenv import load_dotenv  # <--- NEW IMPORT
-
-# Load .env file immediately
-load_dotenv()
-
-# Import your core engine
+from dotenv import load_dotenv
 from flowdb.core.engine import FlowDB
 
-# --- Shared Database State ---
-# We keep the database instance global so both FastAPI and FastMCP can use it.
+load_dotenv()
+
 db_instance: Optional[FlowDB] = None
 DB_PATH = os.getenv("FLOWDB_PATH", "./flow_data")
 
@@ -28,11 +24,25 @@ async def lifespan(app: FastAPI):
     db_instance = FlowDB(storage_path=DB_PATH)
     yield
     print("--- FlowDB Shutting Down ---")
-    # In a real app, explicit closing would happen here
 
 
-# --- 1. The FastAPI App (For Humans/Web Apps) ---
 app = FastAPI(title="FlowDB", lifespan=lifespan)
+
+api_key_header = APIKeyHeader(name="Authorization", auto_error=False)
+
+
+async def verify_api_key(api_key: str = Depends(api_key_header)):
+    real_key = os.getenv("FLOWDB_API_KEY")
+
+    if not real_key:
+        return True
+
+    if api_key != f"Bearer {real_key}":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Invalid API Key",
+        )
+    return True
 
 
 # Helper Models
@@ -48,8 +58,7 @@ def get_db():
     return db_instance
 
 
-# Standard REST Endpoints
-@app.post("/v1/{collection_name}/upsert")
+@app.post("/v1/{collection_name}/upsert", dependencies=[Depends(verify_api_key)])
 def rest_put(collection_name: str, payload: GenericRecord):
     col = get_db().collection(collection_name, GenericRecord)
     vec = np.array(payload.vector, dtype=np.float32) if payload.vector else None
@@ -57,7 +66,7 @@ def rest_put(collection_name: str, payload: GenericRecord):
     return {"status": "success", "id": payload.id}
 
 
-@app.get("/v1/{collection_name}/read/{key}")
+@app.get("/v1/{collection_name}/read/{key}", dependencies=[Depends(verify_api_key)])
 def rest_get(collection_name: str, key: str):
     col = get_db().collection(collection_name, GenericRecord)
     res = col.read(key)
@@ -65,13 +74,13 @@ def rest_get(collection_name: str, key: str):
     return res
 
 
-@app.get("/v1/{collection_name}/all")
+@app.get("/v1/{collection_name}/all", dependencies=[Depends(verify_api_key)])
 def rest_list(collection_name: str, limit: int = 20, skip: int = 0):
     col = get_db().collection(collection_name, GenericRecord)
     return col.all(limit=limit, skip=skip)
 
 
-@app.post("/v1/{collection_name}/search")
+@app.post("/v1/{collection_name}/search", dependencies=[Depends(verify_api_key)])
 def rest_search(collection_name: str, query_text: str = Body(..., embed=True), limit: int = 5):
     """
     Standard Search: Vector similarity lookup.
@@ -85,8 +94,14 @@ def rest_search(collection_name: str, query_text: str = Body(..., embed=True), l
     return [item.model_dump() for item in results]
 
 
-@app.delete("/v1/{collection_name}/delete/{key}")
+@app.delete("/v1/{collection_name}/delete/{key}", dependencies=[Depends(verify_api_key)])
 def rest_delete(collection_name: str, key: str):
+    """
+    Delete a record in a collection by key.
+    :param collection_name: Name of the collection
+    :param key: Unique identifier of the record to delete
+    :return: JSONResponse confirming record deletion
+    """
     col = get_db().collection(collection_name, GenericRecord)
     deleted = col.delete(key)
     if not deleted:
@@ -94,9 +109,13 @@ def rest_delete(collection_name: str, key: str):
     return {"status": "deleted", "id": key}
 
 
-# --- 2. The FastMCP Server (For AI Agents) ---
-# We define this *separately* so we can curate exactly what the AI sees.
-# We don't want the AI to see internal API details, just the high-level tools.
+@app.get("/v1/collections", dependencies=[Depends(verify_api_key)])
+def rest_list_collections():
+    """
+    Returns a list of all active collections (tables).
+    """
+    return {"collections": get_db().list_collections()}
+
 
 mcp = FastMCP("FlowDB Agent Interface")
 
@@ -107,12 +126,9 @@ mcp_asgi = mcp.sse_app()
 def flowdb_upsert(collection: str, key: str, data: Dict[str, Any], vector: List[float] = None):
     """
     Create or Update a record in the database.
-    Use this to save data or fix typos in existing records.
     """
-    # FastMCP handles the JSON serialization automatically!
     col = db_instance.collection(collection, GenericRecord)
 
-    # Wrap data into our internal format
     record = GenericRecord(id=key, data=data, vector=vector)
 
     vec_np = np.array(vector, dtype=np.float32) if vector else None
@@ -123,8 +139,8 @@ def flowdb_upsert(collection: str, key: str, data: Dict[str, Any], vector: List[
 @mcp.tool()
 def flowdb_read(collection: str, key: str) -> str:
     """
-    Retrieve a full record by its ID.
-    Returns the JSON representation of the data.
+    Read data from the database.
+    :returns a single record in a collection
     """
     col = db_instance.collection(collection, GenericRecord)
     res = col.read(key)
@@ -137,7 +153,6 @@ def flowdb_read(collection: str, key: str) -> str:
 def flowdb_search(collection: str, query: str) -> str:
     """
     Semantic search. Finds records by meaning (e.g. "Who is the admin?").
-    Do NOT provide a vector; just provide the text query.
     """
     col = db_instance.collection(collection, GenericRecord)
 
@@ -153,7 +168,8 @@ def flowdb_search(collection: str, query: str) -> str:
 def flowdb_list(collection: str, limit: int = 20, skip: int = 0) -> str:
     """
     List records in a collection.
-    Use this to browse data, see what exists, or find IDs.
+    :returns a list of objects or 'records' in a collection, up to the specified limit.
+    Utilize skip and limit for pagination
     """
     col = db_instance.collection(collection, GenericRecord)
     results = col.all(limit=limit, skip=skip)
@@ -167,9 +183,20 @@ def flowdb_list(collection: str, limit: int = 20, skip: int = 0) -> str:
 
 
 @mcp.tool()
+def flowdb_list_collections() -> str:
+    """
+    List all available collections.
+    """
+    names = db_instance.list_collections()
+    if not names:
+        return "No collections found."
+    return "Available Collections:\n- " + "\n- ".join(names)
+
+
+@mcp.tool()
 def flowdb_delete(collection: str, key: str) -> str:
     """
-    Delete a record by ID. Use this to remove outdated or incorrect information.
+    Delete a record by ID.
     """
     col = db_instance.collection(collection, GenericRecord)
     success = col.delete(key)
@@ -178,10 +205,6 @@ def flowdb_delete(collection: str, key: str) -> str:
     else:
         return f"Record {key} was not found."
 
-
-# --- 3. The Merge (Mounting) ---
-# We mount the MCP server endpoints onto the FastAPI app.
-# Access via: http://localhost:8000/mcp/sse (for configuration)
 
 app.mount("/mcp", mcp_asgi)
 
