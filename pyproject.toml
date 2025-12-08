@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "flowdb-ai"
+name = "flowdb"
 version = "0.1.0"
 description = "The AI-Native Database: JSON + Vectors + MCP"
 readme = "README.md"
