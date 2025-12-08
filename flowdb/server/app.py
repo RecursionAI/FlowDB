@@ -10,17 +10,10 @@ from pydantic import BaseModel
 from fastmcp import FastMCP
 from dotenv import load_dotenv
 
-# Import Core
-try:
-    from core.engine import FlowDB
-    from core.vectorizer import Vectorizer
-except ImportError:
-    from flowdb.core.engine import FlowDB
-    from flowdb.core.vectorizer import Vectorizer
+from flowdb.core.engine import FlowDB
 
 load_dotenv()
 
-# --- SHARED STATE ---
 db_instance: Optional[FlowDB] = None
 DB_PATH = os.getenv("FLOWDB_PATH", "./flow_data")
 
@@ -36,42 +29,33 @@ async def lifespan(app: FastAPI):
         db_instance.close()
 
 
-# --- 1. The FastAPI App ---
 app = FastAPI(title="FlowDB", lifespan=lifespan)
 
 
-# --- 🔒 SECURITY MIDDLEWARE (Pure ASGI Version) ---
-# We use a class instead of @app.middleware to avoid breaking SSE/MCP streams.
 class SecurityMiddleware:
     def __init__(self, app):
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        # Only handle HTTP requests (let websockets/lifespan pass through if needed)
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
 
-        # 1. Allow public paths
         path = scope.get("path", "")
         if path in ["/docs", "/openapi.json", "/favicon.ico"]:
             await self.app(scope, receive, send)
             return
 
-        # 2. Get Real Key
         real_key = os.getenv("FLOWDB_API_KEY")
         if not real_key:
-            # Open Access (Dev Mode)
             await self.app(scope, receive, send)
             return
 
-        # 3. Extract Headers & Query Params from ASGI Scope
         headers = dict(scope.get("headers", []))
         query_string = scope.get("query_string", b"").decode()
 
         input_key = None
 
-        # Check Authorization Header (Bearer or Basic)
         auth_header = headers.get(b"authorization", b"").decode()
 
         if auth_header.startswith("Bearer "):
@@ -89,17 +73,13 @@ class SecurityMiddleware:
             except Exception:
                 pass
 
-        # Check Query Param (?api_key=...)
         if not input_key:
-            # Simple parse of query string
             for param in query_string.split("&"):
                 if param.startswith("api_key="):
                     input_key = param.split("=")[1]
                     break
 
-        # 4. The Gatekeeper
         if input_key != real_key:
-            # Send 403 Forbidden manually (ASGI style)
             await send({
                 "type": "http.response.start",
                 "status": 403,
@@ -111,15 +91,12 @@ class SecurityMiddleware:
             })
             return
 
-        # 5. Success - Pass request through
         await self.app(scope, receive, send)
 
 
-# Add the middleware to the app
 app.add_middleware(SecurityMiddleware)
 
 
-# --- Helper Models & DB Access ---
 class GenericRecord(BaseModel):
     id: str
     data: Dict[str, Any]
@@ -131,8 +108,6 @@ def get_db():
         raise HTTPException(500, "DB not initialized")
     return db_instance
 
-
-# --- Standard REST Endpoints ---
 
 @app.post("/v1/{collection_name}/upsert")
 def rest_put(collection_name: str, payload: GenericRecord):
@@ -238,7 +213,6 @@ def flowdb_delete(collection: str, key: str) -> str:
     return f"Record {key} was not found."
 
 
-# --- 3. Mount and Start ---
 app.mount("/mcp", mcp_asgi)
 
 
