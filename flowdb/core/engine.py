@@ -111,7 +111,7 @@ class Collection(Generic[T]):
                 return None
             return self.model_cls.model_validate_json(data)
 
-    def all(self, limit: int = 100, skip: int = 0) -> List[T]:
+    def list(self, limit: int = 100, skip: int = 0) -> List[T]:
         """Scans records with pagination."""
         results = []
         with self.env.begin(db=self.main_db, write=False) as txn:

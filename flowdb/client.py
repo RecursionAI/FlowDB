@@ -64,7 +64,7 @@ class CollectionClient(Generic[T]):
             results.append(obj)
         return results
 
-    def all(self, limit: int = 100, skip: int = 0) -> List[T]:
+    def list(self, limit: int = 100, skip: int = 0) -> List[T]:
         params = {"limit": limit, "skip": skip}
         resp = self.session.get(self._url("all"), params=params)
 

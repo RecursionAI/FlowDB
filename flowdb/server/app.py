@@ -125,10 +125,10 @@ def rest_get(collection_name: str, key: str):
     return res
 
 
-@app.get("/v1/{collection_name}/all")
+@app.get("/v1/{collection_name}/list")
 def rest_list(collection_name: str, limit: int = 20, skip: int = 0):
     col = get_db().collection(collection_name, GenericRecord)
-    return col.all(limit=limit, skip=skip)
+    return col.list(limit=limit, skip=skip)
 
 
 @app.post("/v1/{collection_name}/search")
