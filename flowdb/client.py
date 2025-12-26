@@ -66,7 +66,7 @@ class CollectionClient(Generic[T]):
 
     def list(self, limit: int = 100, skip: int = 0) -> List[T]:
         params = {"limit": limit, "skip": skip}
-        resp = self.session.get(self._url("all"), params=params)
+        resp = self.session.get(self._url("list"), params=params)
 
         if resp.status_code != 200:
             raise FlowDBError(f"List failed: {resp.text}")
