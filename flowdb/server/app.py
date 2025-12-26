@@ -189,7 +189,7 @@ def flowdb_search(collection: str, query: str) -> str:
 def flowdb_list(collection: str, limit: int = 20, skip: int = 0) -> str:
     """List records in a collection."""
     col = db_instance.collection(collection, GenericRecord)
-    results = col.all(limit=limit, skip=skip)
+    results = col.list(limit=limit, skip=skip)
     if not results: return "No records found."
     summary = [f"ID: {r.id} | Data: {r.data}" for r in results]
     return "\n".join(summary)
