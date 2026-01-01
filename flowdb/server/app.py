@@ -131,10 +131,18 @@ def rest_list(collection_name: str, limit: int = 20, skip: int = 0):
     return col.list(limit=limit, skip=skip)
 
 
+class SearchRequest(BaseModel):
+    query_text: Optional[str] = None
+    vector: Optional[List[float]] = None
+    limit: int = 5
+
+
 @app.post("/v1/{collection_name}/search")
-def rest_search(collection_name: str, query_text: str = Body(..., embed=True), limit: int = 5):
+def rest_search(collection_name: str, payload: SearchRequest):
     col = get_db().collection(collection_name, GenericRecord)
-    results = col.search(query_text=query_text, limit=limit)
+    
+    vec = np.array(payload.vector, dtype=np.float32) if payload.vector else None
+    results = col.search(vector=vec, query_text=payload.query_text, limit=payload.limit)
     return [item.model_dump() for item in results]
 
 

@@ -23,24 +23,15 @@ class Collection(Generic[T]):
     Handles the synchronization between LMDB (Storage) and USearch (Vectors).
     """
 
-    def __init__(self, name: str, model_cls: Type[T], db_path: str, vector_dim: int = 1536):
+    def __init__(self, name: str, model_cls: Type[T], env: lmdb.Environment, db_path: str, vector_dim: int = 1536):
         self.name = name
         self.model_cls = model_cls
         self.db_path = db_path
         self.vector_dim = vector_dim
-
-        # Ensure directories exist
-        os.makedirs(db_path, exist_ok=True)
+        self.env = env
 
         # Initialize Vectorizer (auto-detects OPENAI_API_KEY)
         self.vectorizer = Vectorizer(provider="auto")
-
-        # Setup LMDB Environment
-        self.env = lmdb.open(
-            os.path.join(db_path, "data.lmdb"),
-            max_dbs=10,
-            map_size=10 * 1024 * 1024 * 1024
-        )
 
         # Open specific DBs
         self.main_db = self.env.open_db(f"{name}:main".encode(), create=True)
@@ -58,7 +49,7 @@ class Collection(Generic[T]):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.close()
+        pass # Don't close env here, FlowDB manages it
 
     def _get_next_doc_id(self) -> int:
         """Atomic counter to generate unique integer IDs for USearch"""
@@ -177,7 +168,6 @@ class Collection(Generic[T]):
 
     def close(self):
         """Closes connections cleanly."""
-        self.env.close()
         self.index.save(self.index_path)
 
 
@@ -188,9 +178,19 @@ class FlowDB:
         self.storage_path = storage_path
         self.collections = {}
 
+        # Ensure directories exist
+        os.makedirs(storage_path, exist_ok=True)
+
+        # Setup Shared LMDB Environment
+        self.env = lmdb.open(
+            os.path.join(storage_path, "data.lmdb"),
+            max_dbs=100, # Increased max_dbs for many collections
+            map_size=10 * 1024 * 1024 * 1024
+        )
+
     def collection(self, name: str, model: Type[T]) -> Collection[T]:
         if name not in self.collections:
-            self.collections[name] = Collection(name, model, self.storage_path)
+            self.collections[name] = Collection(name, model, self.env, self.storage_path)
         return self.collections[name]
 
     def list_collections(self) -> List[str]:
@@ -223,3 +223,4 @@ class FlowDB:
             except Exception as e:
                 print(f"Error closing collection {name}: {e}")
         self.collections.clear()
+        self.env.close()

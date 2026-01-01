@@ -50,8 +50,11 @@ class CollectionClient(Generic[T]):
         return self.model.model_validate(wrapper["data"])
 
     def search(self, query: Union[str, List[float]], limit: int = 5) -> List[T]:
-        endpoint = self._url(f"search?limit={limit}")
-        payload = {"query_text": query} if isinstance(query, str) else {"query_text": str(query)}
+        endpoint = self._url("search")
+        if isinstance(query, str):
+            payload = {"query_text": query, "limit": limit}
+        else:
+            payload = {"vector": list(query), "limit": limit}
 
         resp = self.session.post(endpoint, json=payload)
 

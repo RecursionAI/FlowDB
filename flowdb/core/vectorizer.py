@@ -14,7 +14,13 @@ class Vectorizer:
         self.model = model
         self.client = None
 
-        if provider == "openai":
+        if provider == "auto":
+            if os.getenv("OPENAI_API_KEY"):
+                self.provider = "openai"
+            else:
+                self.provider = "mock"
+
+        if self.provider == "openai":
             if not OpenAI:
                 raise ImportError("Run `pip install openai` to use OpenAI vectorizer")
             api_key = os.getenv("OPENAI_API_KEY")

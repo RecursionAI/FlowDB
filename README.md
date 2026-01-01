@@ -30,6 +30,8 @@ FlowDB is ideal for AI applications, automation, speed, and n8n workflows.
 
 ## Getting Started
 
+### GitHub: https://github.com/RecursionAI/FlowDB
+
 ### [Install and Setup](./docs/install.md)
 
 Full guide to install both the Client SDK and configure the dockerized server.
